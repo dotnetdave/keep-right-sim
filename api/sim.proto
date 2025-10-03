@@ -1,0 +1,89 @@
+syntax = "proto3";
+
+package sim.api;
+
+message VehicleState {
+  int64 id = 1;
+  double s = 2;
+  double d = 3;
+  double yaw = 4;
+  double velocity = 5;
+  int32 laneIndex = 6;
+  string vehicleClass = 7;
+  string driverProfile = 8;
+}
+
+message SignalState {
+  string id = 1;
+  bool active = 2;
+}
+
+message SimSnapshot {
+  int64 version = 1;
+  double time = 2;
+  repeated VehicleState vehicles = 3;
+  repeated SignalState signals = 4;
+}
+
+message VehicleUpsert {
+  VehicleState state = 1;
+}
+
+message VehicleRemove {
+  int64 id = 1;
+}
+
+message SimDelta {
+  int64 baseVersion = 1;
+  int64 version = 2;
+  repeated VehicleUpsert upserts = 3;
+  repeated VehicleRemove removes = 4;
+}
+
+message SimStatsSnapshot {
+  double time = 1;
+  double throughputPerHour = 2;
+  repeated double meanLaneSpeeds = 3;
+  repeated double laneSpeedStdDev = 4;
+  repeated double laneOccupancyShare = 5;
+  double travelTimeP50 = 6;
+  double travelTimeP95 = 7;
+}
+
+message CommandEnvelope {
+  oneof command {
+    SpawnVehicle spawnVehicle = 1;
+    DespawnVehicle despawnVehicle = 2;
+    SetSignal setSignal = 3;
+    SetLanePolicy setLanePolicy = 4;
+    SetTimeScale setTimeScale = 5;
+  }
+}
+
+message SpawnVehicle {
+  double time = 1;
+  VehicleAgent agent = 2;
+}
+
+message VehicleAgent {
+  int64 id = 1;
+  string vehicleClass = 2;
+  string driverProfile = 3;
+}
+
+message DespawnVehicle {
+  int64 vehicleId = 1;
+}
+
+message SetSignal {
+  string signalId = 1;
+  bool active = 2;
+}
+
+message SetLanePolicy {
+  string policy = 1;
+}
+
+message SetTimeScale {
+  double scale = 1;
+}
