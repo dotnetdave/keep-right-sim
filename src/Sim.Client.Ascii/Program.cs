@@ -8,6 +8,8 @@ namespace Sim.Client.Ascii;
 
 public static class Program
 {
+    private static int s_debugPrinted = 0;
+
     public static async Task Main(string[] args)
     {
         var cfg = Config.FromArgs(args);
@@ -57,9 +59,17 @@ public static class Program
             }
             while (!result.EndOfMessage);
 
+            string? json = null;
             try
             {
-                var json = Encoding.UTF8.GetString(ms.GetBuffer(), 0, (int)ms.Length);
+                json = Encoding.UTF8.GetString(ms.GetBuffer(), 0, (int)ms.Length);
+                // print the first few received raw messages for debugging
+                if (s_debugPrinted < 5)
+                {
+                    Console.Error.WriteLine("[recv-json] " + json);
+                    s_debugPrinted++;
+                }
+
                 using var doc = JsonDocument.Parse(json);
                 var root = doc.RootElement;
                 if (!root.TryGetProperty("type", out var typeProp))
@@ -67,48 +77,56 @@ public static class Program
                     continue;
                 }
 
-                var type = typeProp.GetString();
-                if (type == "Snapshot")
+                var type = typeProp.GetString()?.ToLowerInvariant();
+                if (type == "snapshot")
                 {
-                    if (!root.TryGetProperty("version", out var verProp) || !root.TryGetProperty("time", out var timeProp))
+                    if (!root.TryGetProperty("payload", out var payload))
                         continue;
 
-                    var vehicles = root.TryGetProperty("vehicles", out var vehProp) ? vehProp : default;
+                    if (!payload.TryGetProperty("version", out var verProp) || !payload.TryGetProperty("time", out var timeProp))
+                        continue;
+
+                    var vehicles = payload.TryGetProperty("vehicles", out var vehProp) ? vehProp : default;
                     world.ApplySnapshot(verProp.GetInt32(), timeProp.GetDouble(), vehicles);
                 }
-                else if (type == "Delta")
+                else if (type == "delta")
                 {
-                    if (!root.TryGetProperty("version", out var verProp))
+                    if (!root.TryGetProperty("payload", out var payload))
                         continue;
 
-                    var upserts = root.TryGetProperty("upserts", out var up) && up.TryGetProperty("vehicles", out var upVeh)
-                        ? upVeh : default;
-                    var removes = root.TryGetProperty("removes", out var rem) && rem.TryGetProperty("vehicles", out var remVeh)
-                        ? remVeh : default;
+                    if (!payload.TryGetProperty("version", out var verProp))
+                        continue;
+
+                    var upserts = payload.TryGetProperty("upserts", out var up) ? up : default;
+                    var removes = payload.TryGetProperty("removes", out var rem) ? rem : default;
                     world.ApplyDelta(verProp.GetInt32(), upserts, removes);
                 }
-                else if (type == "Stats")
+                else if (type == "stats")
                 {
-                    world.ApplyStats(root);
+                    if (root.TryGetProperty("payload", out var payload))
+                        world.ApplyStats(payload);
+                    else
+                        world.ApplyStats(root);
                 }
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"[recv] Failed to process message: {ex.Message}");
+                var snippet = json is null ? "(no json)" : json.Length > 1000 ? json[..1000] + "..." : json;
+                Console.Error.WriteLine($"[recv] Failed to process message: {ex.Message}\n[recv-json] {snippet}");
             }
         }
     }
 }
 
-internal static class Config
+internal class Config
 {
-    public string ServerUrl { get; init; } = "ws://localhost:8080/sim";
-    public int FrameMs { get; init; } = 33;    // ~30fps
-    public int ScreenW { get; init; } = 120;   // columns
-    public int ScreenH { get; init; } = 34;    // rows incl HUD
-    public int Lanes { get; init; } = 3;
-    public double MetersPerCol { get; init; } = 2.0; // horizontal scale
-    public double MaxVisibleM { get; init; }  // computed
+    public string ServerUrl { get; set; } = "ws://localhost:8080/sim";
+    public int FrameMs { get; set; } = 33;    // ~30fps
+    public int ScreenW { get; set; } = 120;   // columns
+    public int ScreenH { get; set; } = 34;    // rows incl HUD
+    public int Lanes { get; set; } = 3;
+    public double MetersPerCol { get; set; } = 2.0; // horizontal scale
+    public double MaxVisibleM { get; set; }  // computed
 
     public static Config FromArgs(string[] args)
     {
@@ -166,18 +184,56 @@ internal static class Ansi
 
     public static void SetupBlueprintPalette()
     {
-        Console.Write(ESC + "?25l");         // hide cursor
-        Console.Write(ESC + "0m");           // reset
-        Console.Write(ESC + "48;5;17m");     // deep blue background
-        Console.Write(ESC + "38;5;195m");    // light cyan foreground
-        Console.Clear();
-        Console.CancelKeyPress += (_, __) => ResetTerminal();
-        AppDomain.CurrentDomain.ProcessExit += (_, __) => ResetTerminal();
+        try
+        {
+            // If output is redirected (no real console), skip terminal control sequences
+            if (Console.IsOutputRedirected) return;
+
+            Console.Write(ESC + "?25l");         // hide cursor
+            Console.Write(ESC + "0m");           // reset
+            Console.Write(ESC + "48;5;17m");     // deep blue background
+            Console.Write(ESC + "38;5;195m");    // light cyan foreground
+            // Enter alternate buffer so we overwrite the screen and avoid scrolling
+            try
+            {
+                Console.Write(ESC + "?1049h");
+            }
+            catch (IOException)
+            {
+                // ignore if terminal doesn't support alternate buffer
+            }
+
+            Console.Clear();
+            Console.CancelKeyPress += (_, __) => ResetTerminal();
+            AppDomain.CurrentDomain.ProcessExit += (_, __) => ResetTerminal();
+        }
+        catch (IOException)
+        {
+            // Running in an environment without a console buffer (e.g., some shells or CI). Skip styling.
+        }
     }
 
     private static void ResetTerminal()
     {
-        Console.Write(ESC + "0m" + ESC + "?25h");
+        try
+        {
+            if (Console.IsOutputRedirected) return;
+            // Exit alternate buffer if we entered it
+            try
+            {
+                Console.Write(ESC + "?1049l");
+            }
+            catch (IOException)
+            {
+                // ignore
+            }
+
+            Console.Write(ESC + "0m" + ESC + "?25h");
+        }
+        catch (IOException)
+        {
+            // ignore reset failures
+        }
     }
 
     public static void Reset() => Console.Write("\u001b[0m");
@@ -266,8 +322,13 @@ internal sealed class WorldState
         {
             if (upserts.ValueKind == JsonValueKind.Array)
             {
-                foreach (var v in upserts.EnumerateArray())
+                foreach (var item in upserts.EnumerateArray())
                 {
+                    // upsert may be either a VehicleState or an object { state: VehicleState }
+                    var v = item.ValueKind == JsonValueKind.Object && item.TryGetProperty("state", out var inner)
+                        ? inner
+                        : item;
+
                     var parsed = ParseVeh(v);
                     _byId[parsed.Id] = parsed;
                 }
@@ -277,7 +338,17 @@ internal sealed class WorldState
             {
                 foreach (var r in removes.EnumerateArray())
                 {
-                    var id = r.GetString();
+                    // remove entry may be a primitive id or an object { id: 123 }
+                    string id = string.Empty;
+                    if (r.ValueKind == JsonValueKind.String)
+                        id = r.GetString() ?? string.Empty;
+                    else if (r.ValueKind == JsonValueKind.Number)
+                        id = r.GetInt64().ToString();
+                    else if (r.ValueKind == JsonValueKind.Object && r.TryGetProperty("id", out var idProp))
+                    {
+                        id = idProp.ValueKind == JsonValueKind.String ? idProp.GetString() ?? string.Empty : idProp.GetInt64().ToString();
+                    }
+
                     if (!string.IsNullOrEmpty(id))
                     {
                         _byId.Remove(id);
@@ -312,16 +383,70 @@ internal sealed class WorldState
 
     private static V ParseVeh(JsonElement v)
     {
+        // id may be numeric or string
+        var id = string.Empty;
+        if (v.TryGetProperty("id", out var idProp))
+        {
+            id = idProp.ValueKind == JsonValueKind.String ? idProp.GetString() ?? string.Empty : idProp.GetInt64().ToString();
+        }
+
+        // lane may be 'lane' or 'laneIndex'
+        var lane = 0;
+        if (v.TryGetProperty("lane", out var laneProp)) lane = laneProp.GetInt32();
+        else if (v.TryGetProperty("laneIndex", out var laneIdxProp)) lane = laneIdxProp.GetInt32();
+
+        // s/d/yaw
+        var sVal = v.TryGetProperty("s", out var sProp) ? sProp.GetDouble() : 0.0;
+        var dVal = v.TryGetProperty("d", out var dProp) ? dProp.GetDouble() : 0.0;
+        var yawVal = v.TryGetProperty("yaw", out var yProp) ? yProp.GetDouble() : 0.0;
+
+        // velocity may be 'v' or 'velocity'
+        var vel = 0.0;
+        if (v.TryGetProperty("v", out var vProp)) vel = vProp.GetDouble();
+        else if (v.TryGetProperty("velocity", out var velProp)) vel = velProp.GetDouble();
+
+        // class/profile may be 'class'/'profile' (strings) or 'vehicleClass'/'driverProfile' (numeric enums)
+        string? cls = null;
+        if (v.TryGetProperty("class", out var classProp)) cls = classProp.ValueKind == JsonValueKind.String ? classProp.GetString() : classProp.ToString();
+        else if (v.TryGetProperty("vehicleClass", out var vcProp))
+        {
+            if (vcProp.ValueKind == JsonValueKind.Number && vcProp.TryGetInt32(out var ci))
+            {
+                // map numeric enum to names: Car, Van, Truck, Bus, Motorcycle
+                var names = new[] { "Car", "Van", "Truck", "Bus", "Motorcycle" };
+                cls = (ci >= 0 && ci < names.Length) ? names[ci] : ci.ToString();
+            }
+            else
+            {
+                cls = vcProp.ValueKind == JsonValueKind.String ? vcProp.GetString() : vcProp.ToString();
+            }
+        }
+
+        string? profile = null;
+        if (v.TryGetProperty("profile", out var profileProp)) profile = profileProp.ValueKind == JsonValueKind.String ? profileProp.GetString() : profileProp.ToString();
+        else if (v.TryGetProperty("driverProfile", out var dpProp))
+        {
+            if (dpProp.ValueKind == JsonValueKind.Number && dpProp.TryGetInt32(out var pi))
+            {
+                var names = new[] { "Normal", "Speeder", "LaneChanger", "Undertaker", "Hogger", "Timid" };
+                profile = (pi >= 0 && pi < names.Length) ? names[pi] : pi.ToString();
+            }
+            else
+            {
+                profile = dpProp.ValueKind == JsonValueKind.String ? dpProp.GetString() : dpProp.ToString();
+            }
+        }
+
         var vehicle = new V
         {
-            Id = GetStr(v, "id"),
-            Lane = v.TryGetProperty("lane", out var laneProp) ? laneProp.GetInt32() : 0,
-            S = v.TryGetProperty("s", out var sProp) ? sProp.GetDouble() : 0,
-            D = v.TryGetProperty("d", out var dProp) ? dProp.GetDouble() : 0,
-            Yaw = v.TryGetProperty("yaw", out var yProp) ? yProp.GetDouble() : 0,
-            Vms = v.TryGetProperty("v", out var spProp) ? spProp.GetDouble() : 0,
-            Class = v.TryGetProperty("class", out var classProp) ? classProp.GetString() : null,
-            Profile = v.TryGetProperty("profile", out var profileProp) ? profileProp.GetString() : null
+            Id = id,
+            Lane = lane,
+            S = sVal,
+            D = dVal,
+            Yaw = yawVal,
+            Vms = vel,
+            Class = cls,
+            Profile = profile
         };
 
         return vehicle;
@@ -339,12 +464,21 @@ internal sealed class Renderer
     private readonly int _hudRows = 6;
     private double _scrollOriginM;
     private double _cameraSpeedMps = 25;
+    private const double LaneWidthM = 3.7; // must match host network lane width
 
     public Renderer(Config cfg)
     {
         _cfg = cfg;
         _buf = new char[cfg.ScreenH, cfg.ScreenW];
-        Console.CursorVisible = false;
+        try
+        {
+            if (!Console.IsOutputRedirected)
+                Console.CursorVisible = false;
+        }
+        catch (IOException)
+        {
+            // ignore when running without a console buffer
+        }
     }
 
     public void AdvanceCamera(double dt)
@@ -370,7 +504,8 @@ internal sealed class Renderer
                 continue;
             }
 
-            var laneRow = LaneToRow(v.Lane);
+            // Use lateral offset (D) to compute fractional lane position and map to row for smoother lane changes
+            var laneRow = FractionalLaneToRow(v.D / LaneWidthM);
             if (laneRow < _hudRows || laneRow >= _cfg.ScreenH)
             {
                 continue;
@@ -400,6 +535,25 @@ internal sealed class Renderer
         var laneBand = Math.Max(1, usableRows / Math.Max(1, _cfg.Lanes));
         var idxTopToBottom = (_cfg.Lanes - 1 - lane);
         return _hudRows + idxTopToBottom * laneBand + laneBand / 2;
+    }
+
+    private int FractionalLaneToRow(double lateralMeters)
+    {
+        // lateralMeters is offset from rightmost lane center; compute fractional lane index
+        var fractionalLane = lateralMeters / LaneWidthM; // 0 => rightmost lane center
+        // Convert fractionalLane to lane index counting from right (0..lanes-1)
+        var laneIndexFloat = Math.Clamp(fractionalLane, 0.0, Math.Max(0.0, _cfg.Lanes - 1 + 0.999));
+
+        var usableRows = _cfg.ScreenH - _hudRows;
+        var laneBand = Math.Max(1, usableRows / Math.Max(1, _cfg.Lanes));
+
+        // Map fractional lane to a Y position between top and bottom of lane band for that lane
+        // idxTopToBottom for fractional: 0 => topmost lane area, so compute from rightmost
+        var idxTopToBottomFloat = (_cfg.Lanes - 1) - laneIndexFloat;
+        var baseRow = _hudRows + Math.Floor(idxTopToBottomFloat) * laneBand;
+        var intra = idxTopToBottomFloat - Math.Floor(idxTopToBottomFloat);
+        var row = (int)Math.Round(baseRow + intra * laneBand + laneBand / 2.0);
+        return Math.Clamp(row, _hudRows, _cfg.ScreenH - 1);
     }
 
     private void DrawHud(int ver, double time, int liveCount, (long exited, double[] avgSpeed, double[] util) stats)
@@ -478,18 +632,57 @@ internal sealed class Renderer
 
     private void Flush()
     {
-        Console.Write("\u001b[H");
-        var sb = new StringBuilder(_cfg.ScreenH * (_cfg.ScreenW + 1));
-        for (int y = 0; y < _cfg.ScreenH; y++)
+        if (Console.IsOutputRedirected) return;
+        // First try a managed cursor approach (works on Windows consoles that ignore ANSI alternate buffer)
+        try
         {
-            for (int x = 0; x < _cfg.ScreenW; x++)
+            // Try to position cursor at top-left; this will throw in non-interactive environments
+            Console.SetCursorPosition(0, 0);
+
+            for (int y = 0; y < _cfg.ScreenH; y++)
             {
-                sb.Append(_buf[y, x]);
+                try
+                {
+                    Console.SetCursorPosition(0, y);
+                }
+                catch (IOException)
+                {
+                    // fall back to ANSI writer below
+                    throw;
+                }
+
+                var rowSb = new StringBuilder(_cfg.ScreenW);
+                for (int x = 0; x < _cfg.ScreenW; x++) rowSb.Append(_buf[y, x]);
+                // write the row without adding extra newline (we position cursor explicitly)
+                Console.Write(rowSb.ToString());
             }
 
-            sb.Append('\n');
+            return;
         }
+        catch
+        {
+            // If SetCursorPosition is not supported or fails, fall back to ANSI home + write
+            try
+            {
+                Console.Write("\u001b[H");
+                var sb = new StringBuilder(_cfg.ScreenH * _cfg.ScreenW + (_cfg.ScreenH - 1));
+                for (int y = 0; y < _cfg.ScreenH; y++)
+                {
+                    for (int x = 0; x < _cfg.ScreenW; x++)
+                    {
+                        sb.Append(_buf[y, x]);
+                    }
 
-        Console.Write(sb.ToString());
+                    if (y != _cfg.ScreenH - 1)
+                        sb.Append('\n');
+                }
+
+                Console.Write(sb.ToString());
+            }
+            catch
+            {
+                // give up silently if writing also fails
+            }
+        }
     }
 }

@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using Sim.Core.DTO;
 using Sim.Core.Metrics;
 using Sim.Core.Model;
+using Sim.Core.Sim;
 using Sim.Core.Sim.Seeding;
 
 namespace Sim.Core.Demo;
