@@ -8,8 +8,8 @@ public enum LanePolicy
 }
 
 public sealed record LanePolicyConfig(
-    LanePolicy Policy,
-    double SafetyDecelThreshold,
-    double KeepRightBonus,
-    double LeftPenalty,
-    double UndertakeBonus);
+    LanePolicy Policy = LanePolicy.KeepRight,
+    double DeltaAT = 0.3,
+    double ReturnRightThreshold = 0.5,
+    double RecentChangePenalty = 0.3,
+    double StickySeconds = 3.0);

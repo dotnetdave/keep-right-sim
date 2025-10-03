@@ -69,6 +69,13 @@ Policy overlays bias the incentive:
 
 Driver parameters (politeness, lane change threshold, right-pass bias) determine the numeric impact.
 
+### Lane Change Stability & Safety
+
+- **Cooldown & Hysteresis** — Each driver now tracks the last executed lane change and enforces a cooldown window in addition to policy “stickiness.” A pending maneuver must first exceed the driver's `EnterThreshold` before being latched as intent, and it will only execute on a subsequent evaluation when the incentive remains above `ExitThreshold`. This hysteresis prevents rapid ping-ponging between lanes.
+- **Gap Acceptance with TTC** — The MOBIL incentive is gated by explicit gap and time-to-collision checks. A candidate lane is only accepted when both front and rear gaps exceed absolute distance minima and the TTC against the target lead/follower stays above driver-specific limits, ensuring merges happen into feasible openings.
+- **Do-No-Harm Rule** — Beyond classic MOBIL safety, a maneuver is rejected if it would force the target follower to brake harder than the configured comfort deceleration (`DeltaAT`) or if it would create sub-threshold TTC conflicts. Vehicles also perform a geometric overlap guard before committing, so no merge can cause an immediate collision.
+- **Configurable Parameters** — The new controls surface through `DriverParams` (cooldown seconds, min gaps, TTCs, enter/exit thresholds) and `LanePolicyConfig` (follower decel allowance, return-right bias, recent-change penalty, sticky seconds). Tune these per profile or policy to balance throughput against stability.
+
 ## Simulation Interfaces
 
 `ISimulation` exposes deterministic control:

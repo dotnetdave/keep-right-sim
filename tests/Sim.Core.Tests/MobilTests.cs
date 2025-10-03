@@ -36,7 +36,7 @@ public class MobilTests
         SetState(vehicles, targetFollower.Id, lane: 0, position: 90, speed: 20);
         SetState(vehicles, targetLeader.Id, lane: 0, position: 130, speed: 25);
 
-        sim.Apply(new SetLanePolicy(new LanePolicyConfig(LanePolicy.KeepRight, 2.5, 0.2, 0.1, 0)));
+        sim.Apply(new SetLanePolicy(new LanePolicyConfig(LanePolicy.KeepRight, 2.5, 0.0, 0.0, 1.0)));
         sim.Step(0.5);
 
         var meRuntime = vehicles[me.Id];
@@ -64,7 +64,7 @@ public class MobilTests
         SetState(vehicles, follower.Id, lane: 1, position: 80, speed: 26);
         SetState(vehicles, leader.Id, lane: 1, position: 130, speed: 20);
 
-        sim.Apply(new SetLanePolicy(new LanePolicyConfig(LanePolicy.KeepRight, 4.0, 0.2, 0.1, 0)));
+        sim.Apply(new SetLanePolicy(new LanePolicyConfig(LanePolicy.KeepRight, 4.0, 0.0, 0.0, 1.0)));
         sim.Step(0.5);
 
         var meRuntime = vehicles[me.Id];
