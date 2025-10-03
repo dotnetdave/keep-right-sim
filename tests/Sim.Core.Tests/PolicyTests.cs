@@ -31,7 +31,7 @@ public class PolicyTests
         var sim = HighwaySimulationFactory.Create(new HighwayNetwork(3, 3.7, 500, 33.33), TrafficMixes.KeepRightDiscipline);
         var agent = CreateAgent(2, VehicleClass.Car, DriverProfile.Hogger);
         sim.Apply(new SpawnVehicle(0, agent));
-        sim.Apply(new SetLanePolicy(new LanePolicyConfig(LanePolicy.Hogging, 3.0, 0.05, 0.05, 0)));
+        sim.Apply(new SetLanePolicy(new LanePolicyConfig(LanePolicy.Hogging, 3.0, 0.05, 0.05, 0.5)));
         sim.Step(0);
 
         var vehicles = GetRuntimeDictionary(sim);

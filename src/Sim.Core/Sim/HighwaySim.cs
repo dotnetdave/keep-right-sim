@@ -219,6 +219,7 @@ public sealed class HighwaySim : ISimulation
     private Dictionary<long, VehicleDecision> EvaluateLaneChanges(IReadOnlyList<List<VehicleRuntime>> lanes)
     {
         var decisions = new Dictionary<long, VehicleDecision>(_vehicles.Count);
+        var now = Time;
 
         for (var laneIndex = 0; laneIndex < lanes.Count; laneIndex++)
         {
@@ -228,14 +229,37 @@ public sealed class HighwaySim : ISimulation
                 var vehicle = lane[i];
                 var leader = i < lane.Count - 1 ? lane[i + 1] : null;
                 var follower = i > 0 ? lane[i - 1] : null;
-                var accelStay = ComputeAcceleration(vehicle, leader);
 
+                DecayRecentLaneChanges(vehicle, now);
+
+                if (vehicle.PendingTargetLane >= 0 && now - vehicle.PendingSince > 2.0)
+                {
+                    vehicle.PendingTargetLane = -1;
+                    vehicle.PendingSince = double.NegativeInfinity;
+                }
+
+                var accelStay = ComputeAcceleration(vehicle, leader);
                 var bestLane = vehicle.LaneIndex;
                 var chosenAccel = accelStay;
                 var bestUtility = double.NegativeInfinity;
 
+                var driver = vehicle.Agent.Driver;
+                var coolingWindow = Math.Max(driver.LaneChangeCooldownSec, _policy.StickySeconds);
+                var cooling = (now - vehicle.LastLaneChangeAt) < coolingWindow;
+
+                if (cooling && vehicle.PendingTargetLane >= 0)
+                {
+                    vehicle.PendingTargetLane = -1;
+                    vehicle.PendingSince = double.NegativeInfinity;
+                }
+
                 foreach (var candidate in GetCandidateLanes(vehicle.LaneIndex))
                 {
+                    if (cooling)
+                    {
+                        continue;
+                    }
+
                     if (!IsLaneAllowed(vehicle.Agent, candidate))
                     {
                         continue;
@@ -250,18 +274,59 @@ public sealed class HighwaySim : ISimulation
 
                     var deltaFollowerTarget = ComputeFollowerDelta(candidateFollower, candidateLeader, vehicle);
                     var deltaFollowerCurrent = ComputeFollowerDelta(follower, vehicle, leader);
-                    var politeness = vehicle.Agent.Driver.Politeness;
+                    var politeness = driver.Politeness;
                     var utility = incentive - politeness * (deltaFollowerTarget + deltaFollowerCurrent);
                     utility += PolicyUtility(vehicle, candidate, leader, candidateLeader);
+                    utility -= _policy.RecentChangePenalty * Math.Min(3, vehicle.RecentLaneChanges);
 
-                    if (utility > vehicle.Agent.Driver.LaneChangeThreshold && SafetySatisfied(candidateFollower, vehicle))
+                    if (vehicle.PendingTargetLane < 0)
                     {
-                        if (utility > bestUtility)
+                        if (incentive > driver.EnterThreshold)
                         {
-                            bestUtility = utility;
-                            bestLane = candidate;
-                            chosenAccel = accelChange;
+                            vehicle.PendingTargetLane = candidate;
+                            vehicle.PendingSince = now;
                         }
+
+                        continue;
+                    }
+
+                    if (vehicle.PendingTargetLane != candidate)
+                    {
+                        continue;
+                    }
+
+                    if (incentive < driver.ExitThreshold)
+                    {
+                        vehicle.PendingTargetLane = -1;
+                        vehicle.PendingSince = double.NegativeInfinity;
+                        continue;
+                    }
+
+                    if (utility <= driver.LaneChangeThreshold)
+                    {
+                        continue;
+                    }
+
+                    if (!GapAccepted(vehicle, candidateLeader, candidateFollower))
+                    {
+                        continue;
+                    }
+
+                    if (!SafetySatisfied(candidateFollower, vehicle))
+                    {
+                        continue;
+                    }
+
+                    if (!HasNoOverlap(vehicle, candidateLeader, candidateFollower))
+                    {
+                        continue;
+                    }
+
+                    if (utility > bestUtility)
+                    {
+                        bestUtility = utility;
+                        bestLane = candidate;
+                        chosenAccel = accelChange;
                     }
                 }
 
@@ -270,6 +335,45 @@ public sealed class HighwaySim : ISimulation
         }
 
         return decisions;
+    }
+
+    private static void DecayRecentLaneChanges(VehicleRuntime vehicle, double now)
+    {
+        var elapsed = now - vehicle.LastRecentChangeDecayTime;
+        if (elapsed <= 0)
+        {
+            return;
+        }
+
+        var steps = (int)Math.Floor(elapsed);
+        if (steps <= 0)
+        {
+            return;
+        }
+
+        vehicle.RecentLaneChanges = Math.Max(0, vehicle.RecentLaneChanges - steps);
+        vehicle.LastRecentChangeDecayTime += steps;
+    }
+
+    private bool GapAccepted(VehicleRuntime vehicle, VehicleRuntime? candidateLeader, VehicleRuntime? candidateFollower)
+    {
+        var driver = vehicle.Agent.Driver;
+        var leadS = candidateLeader?.S ?? (vehicle.S + driver.MinFrontGapM + 1_000);
+        var leadV = candidateLeader?.Speed ?? Math.Min(vehicle.Agent.Vehicle.MaxSpeed, _network.SpeedLimit);
+        var followerS = candidateFollower?.S ?? (vehicle.S - driver.MinRearGapM - 1_000);
+        var followerV = candidateFollower?.Speed ?? vehicle.Speed;
+
+        return LaneChangeSafety.AcceptsGap(
+            vehicle.S,
+            vehicle.Speed,
+            leadS,
+            leadV,
+            followerS,
+            followerV,
+            driver.MinFrontGapM,
+            driver.MinRearGapM,
+            driver.MinFrontTtcSec,
+            driver.MinRearTtcSec);
     }
 
     private IEnumerable<int> GetCandidateLanes(int currentLane)
@@ -352,29 +456,40 @@ public sealed class HighwaySim : ISimulation
         var movingRight = candidateLane < vehicle.LaneIndex;
         var movingLeft = candidateLane > vehicle.LaneIndex;
         var overtaking = currentLeader is not null && currentLeader.Speed + 0.5 < vehicle.Speed;
+        var bias = _policy.ReturnRightThreshold;
 
-        if ((_policy.Policy == LanePolicy.KeepRight || vehicle.Agent.Driver.KeepRightBias) && movingRight && !overtaking)
+        if (movingRight && !overtaking)
         {
-            utility += _policy.KeepRightBonus;
-        }
-
-        if ((_policy.Policy == LanePolicy.KeepRight || vehicle.Agent.Driver.KeepRightBias) && movingLeft && !overtaking)
-        {
-            utility -= _policy.LeftPenalty;
-        }
-
-        if (_policy.Policy == LanePolicy.Hogging && movingRight)
-        {
-            utility -= _policy.KeepRightBonus;
-        }
-
-        if ((_policy.Policy == LanePolicy.UndertakeFriendly || vehicle.Agent.Driver.RightPassBias > 0) && movingRight)
-        {
-            var candidateSpeed = candidateLeader?.Speed ?? vehicle.Agent.Vehicle.MaxSpeed;
-            var currentSpeed = currentLeader?.Speed ?? vehicle.Agent.Vehicle.MaxSpeed;
-            if (candidateSpeed > currentSpeed)
+            if (_policy.Policy == LanePolicy.KeepRight || vehicle.Agent.Driver.KeepRightBias)
             {
-                utility += _policy.UndertakeBonus + vehicle.Agent.Driver.RightPassBias;
+                utility += bias;
+            }
+
+            if (_policy.Policy == LanePolicy.Hogging)
+            {
+                utility -= bias * 0.5;
+            }
+
+            if (_policy.Policy == LanePolicy.UndertakeFriendly || vehicle.Agent.Driver.RightPassBias > 0)
+            {
+                var candidateSpeed = candidateLeader?.Speed ?? vehicle.Agent.Vehicle.MaxSpeed;
+                var currentSpeed = currentLeader?.Speed ?? vehicle.Agent.Vehicle.MaxSpeed;
+                if (candidateSpeed > currentSpeed)
+                {
+                    utility += vehicle.Agent.Driver.RightPassBias + bias * 0.5;
+                }
+            }
+        }
+
+        if (movingLeft && !overtaking)
+        {
+            if (_policy.Policy == LanePolicy.KeepRight || vehicle.Agent.Driver.KeepRightBias)
+            {
+                utility -= bias;
+            }
+            else if (_policy.Policy == LanePolicy.Hogging)
+            {
+                utility += bias * 0.5;
             }
         }
 
@@ -389,7 +504,32 @@ public sealed class HighwaySim : ISimulation
         }
 
         var accel = ComputeAcceleration(follower, vehicle);
-        return accel >= -_policy.SafetyDecelThreshold;
+        return accel >= -_policy.DeltaAT;
+    }
+
+    private static bool HasNoOverlap(VehicleRuntime vehicle, VehicleRuntime? targetLeader, VehicleRuntime? targetFollower)
+    {
+        var myLength = vehicle.Agent.Vehicle.Length;
+
+        if (targetLeader is not null)
+        {
+            var leadClear = (targetLeader.S - vehicle.S) - 0.5 * (myLength + targetLeader.Agent.Vehicle.Length);
+            if (leadClear < 0)
+            {
+                return false;
+            }
+        }
+
+        if (targetFollower is not null)
+        {
+            var rearClear = (vehicle.S - targetFollower.S) - 0.5 * (myLength + targetFollower.Agent.Vehicle.Length);
+            if (rearClear < 0)
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private void ApplyLaneChanges(IReadOnlyDictionary<long, VehicleDecision> decisions)
@@ -398,7 +538,17 @@ public sealed class HighwaySim : ISimulation
         {
             if (_vehicles.TryGetValue(id, out var vehicle))
             {
-                vehicle.LaneIndex = decision.TargetLane;
+                var originalLane = vehicle.LaneIndex;
+                if (decision.TargetLane != originalLane)
+                {
+                    vehicle.LaneIndex = decision.TargetLane;
+                    vehicle.LastLaneChangeAt = Time;
+                    vehicle.RecentLaneChanges = Math.Min(3, vehicle.RecentLaneChanges + 1);
+                    vehicle.PendingTargetLane = -1;
+                    vehicle.PendingSince = double.NegativeInfinity;
+                    vehicle.LastRecentChangeDecayTime = Time;
+                }
+
                 vehicle.PlannedAcceleration = decision.Acceleration;
             }
         }
@@ -497,6 +647,10 @@ public sealed class HighwaySim : ISimulation
             Agent = agent;
             LaneIndex = laneIndex;
             EnterTime = enterTime;
+            LastLaneChangeAt = -1e9;
+            PendingTargetLane = -1;
+            PendingSince = double.NegativeInfinity;
+            LastRecentChangeDecayTime = enterTime;
         }
 
         public VehicleAgent Agent { get; }
@@ -505,6 +659,11 @@ public sealed class HighwaySim : ISimulation
         public int LaneIndex { get; set; }
         public double EnterTime { get; }
         public double PlannedAcceleration { get; set; }
+        public double LastLaneChangeAt { get; set; }
+        public int RecentLaneChanges { get; set; }
+        public int PendingTargetLane { get; set; }
+        public double PendingSince { get; set; }
+        public double LastRecentChangeDecayTime { get; set; }
     }
 
     private sealed record VehicleDecision(double Acceleration, int TargetLane);
@@ -516,10 +675,10 @@ public static class HighwaySimulationFactory
     {
         var policy = mix.Policy switch
         {
-            LanePolicy.KeepRight => new LanePolicyConfig(LanePolicy.KeepRight, 4.0, 0.2, 0.2, 0.0),
-            LanePolicy.Hogging => new LanePolicyConfig(LanePolicy.Hogging, 3.0, 0.05, 0.05, 0.0),
-            LanePolicy.UndertakeFriendly => new LanePolicyConfig(LanePolicy.UndertakeFriendly, 3.5, 0.1, 0.05, 0.3),
-            _ => new LanePolicyConfig(LanePolicy.KeepRight, 4.0, 0.2, 0.2, 0.0)
+            LanePolicy.KeepRight => new LanePolicyConfig(LanePolicy.KeepRight, 0.3, 0.6, 0.3, 3.0),
+            LanePolicy.Hogging => new LanePolicyConfig(LanePolicy.Hogging, 0.3, 0.2, 0.35, 4.0),
+            LanePolicy.UndertakeFriendly => new LanePolicyConfig(LanePolicy.UndertakeFriendly, 0.3, 0.4, 0.25, 3.0),
+            _ => new LanePolicyConfig()
         };
 
         return new HighwaySim(network, policy);
