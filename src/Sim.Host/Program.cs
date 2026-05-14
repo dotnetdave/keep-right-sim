@@ -6,6 +6,7 @@ using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Sim.Core.Demo;
 using Sim.Core.DTO;
 using Sim.Core.Model;
 using Sim.Core.Sim;
@@ -13,6 +14,20 @@ using Sim.Core.Sim.Seeding;
 
 var config = HostConfig.Parse(args);
 var network = new HighwayNetwork(config.Lanes, 3.7, config.LengthKm * 1000.0, config.SpeedLimit);
+
+if (config.Report)
+{
+    var comparison = EducationalReport.Compare(
+        config.DurationSeconds,
+        config.TimeStep,
+        config.Demand,
+        config.Seed,
+        network,
+        config.WarmupSeconds);
+    Console.WriteLine(EducationalReport.ToMarkdown(comparison));
+    return;
+}
+
 var mix = config.Scenario == Scenario.KeepRight ? TrafficMixes.KeepRightDiscipline : TrafficMixes.HogUndertake;
 var simulation = HighwaySimulationFactory.Create(network, mix);
 var seeder = new TrafficSeeder(config.Demand, config.Seed, mix);
@@ -317,6 +332,9 @@ sealed class HostConfig
     public int SnapshotInterval { get; private set; } = 5;
     public double TimeStep { get; private set; } = 0.02;
     public int Port { get; private set; } = 8080;
+    public bool Report { get; private set; }
+    public double DurationSeconds { get; private set; } = 600;
+    public double WarmupSeconds { get; private set; } = 120;
 
     public static HostConfig Parse(string[] args)
     {
@@ -349,6 +367,18 @@ sealed class HostConfig
                     break;
                 case "--port" when i + 1 < args.Length:
                     config.Port = int.Parse(args[++i]);
+                    break;
+                case "--report":
+                    config.Report = true;
+                    break;
+                case "--duration" when i + 1 < args.Length:
+                    config.DurationSeconds = double.Parse(args[++i]);
+                    break;
+                case "--warmup" when i + 1 < args.Length:
+                    config.WarmupSeconds = double.Parse(args[++i]);
+                    break;
+                case "--dt" when i + 1 < args.Length:
+                    config.TimeStep = double.Parse(args[++i]);
                     break;
             }
         }
