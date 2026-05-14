@@ -5,7 +5,7 @@
 The solution is organized into three cooperating projects:
 
 - **Sim.Core** — A deterministic, pure .NET library that models highway traffic. It exposes simulation interfaces, data transfer objects, seeding utilities, metrics, and demo orchestration. This project contains no networking or Unity dependencies and can run on any .NET 8 runtime.
-- **Sim.Host** — A .NET 8 console application that embeds the core simulation, advances it at a fixed timestep, and serves realtime state over WebSockets. It accepts control commands and reports health metrics for orchestration or dashboards.
+- **Sim.Host** — A .NET 8 console application that embeds the core simulation, advances it at a fixed timestep, serves realtime state over WebSockets, and can run a deterministic `--report` A/B comparison for lessons or workshops. It accepts control commands and reports health metrics for orchestration or dashboards.
 - **Sim.Client.Unity** — A library of C# scripts that implement a minimal WebSocket client for consuming simulation snapshots within Unity or any .NET environment. Unity-specific integrations are left as comments so the code compiles in standard .NET builds.
 
 The repository also reserves **api/sim.proto** for future gRPC evolution and **tests/Sim.Core.Tests** for automated verification of the physics, policies, and determinism. The **docs** folder hosts this guide and any accompanying design documents.
@@ -113,9 +113,9 @@ Both mixes use the same vehicle class distribution.
 
 `Sensors` maintains throughput, lane occupancy, mean/variance (via Welford) of speeds, and travel time percentiles. A `SimStatsSnapshot` aggregates current metrics. The host publishes stats once per simulated second and logs summaries every simulated minute.
 
-## Demo Experiment
+## Demo Experiment and Educational Report
 
-`Experiment` constructs two independent `HighwaySim` instances with identical seeds and demand, differing only in lane policy mix. It records snapshots and stats to demonstrate how lane discipline affects throughput and variability.
+`Experiment` constructs two independent `HighwaySim` instances with identical seeds and demand, differing only in lane policy mix. It records snapshots and stats to demonstrate how lane discipline affects throughput and variability. `EducationalReport` turns that A/B run into a markdown-ready teaching summary with median journey-time savings, 95th percentile savings, throughput gain, right-lane/passing-lane utilization, and discussion lessons.
 
 ## Running the Demo Scenarios
 
@@ -131,7 +131,11 @@ dotnet run --project src/Sim.Host -- --scenario keep-right --demand 1800 --seed 
 dotnet run --project src/Sim.Host -- --scenario hog --demand 1800 --seed 42
 ```
 
-Observe console stats every simulated minute to compare throughput and variance.
+Observe console stats every simulated minute to compare throughput and variance, or generate the v1 educational report directly:
+
+```bash
+dotnet run --project src/Sim.Host -- --report --demand 1800 --duration 600 --warmup 120 --seed 42
+```
 
 ## Visualization Guidelines
 
@@ -148,13 +152,14 @@ When building a visualizer (Unity or otherwise), follow the blueprint aesthetic:
 dotnet build
 dotnet test
 dotnet run --project src/Sim.Host -- --scenario keep-right --demand 1800
+dotnet run --project src/Sim.Host -- --report
 ```
 
 ## Acceptance Criteria Checklist
 
 - Solution builds on .NET 8 without warnings.
 - `dotnet test` passes, covering IDM, MOBIL, policy biases, stats, and determinism.
-- Running the host with keep-right vs hog scenarios (same seed/demand) yields observable differences in throughput or lane metrics.
+- Running the host with keep-right vs hog scenarios (same seed/demand) yields observable differences in throughput or lane metrics, and `--report` prints a readable educational comparison.
 - WebSocket server broadcasts snapshots and deltas at the configured cadence.
 - Unity client stub connects to `ws://localhost:8080/sim` and logs received snapshots.
 - Codebase is documented, deterministic, and free of Unity dependencies in the core.

@@ -258,7 +258,9 @@ internal sealed class WorldState
     private double _time;
     private readonly object _gate = new();
 
-    private long _vehiclesExited;
+    private double _throughputPerHour;
+    private double _travelTimeP50;
+    private double _travelTimeP95;
     private double[] _laneAvgSpeed = Array.Empty<double>();
     private double[] _laneUtil = Array.Empty<double>();
 
@@ -289,11 +291,11 @@ internal sealed class WorldState
         };
     }
 
-    public (long exited, double[] avgSpeed, double[] util) StatsSnapshot()
+    public (double throughput, double p50, double p95, double[] avgSpeed, double[] util) StatsSnapshot()
     {
         lock (_gate)
         {
-            return (_vehiclesExited, _laneAvgSpeed.ToArray(), _laneUtil.ToArray());
+            return (_throughputPerHour, _travelTimeP50, _travelTimeP95, _laneAvgSpeed.ToArray(), _laneUtil.ToArray());
         }
     }
 
@@ -364,19 +366,37 @@ internal sealed class WorldState
     {
         lock (_gate)
         {
-            if (stats.TryGetProperty("vehiclesExited", out var ex))
+            if (stats.TryGetProperty("throughputPerHour", out var throughput))
             {
-                _vehiclesExited = ex.GetInt64();
+                _throughputPerHour = throughput.GetDouble();
             }
 
-            if (stats.TryGetProperty("laneAvgSpeed", out var las) && las.ValueKind == JsonValueKind.Array)
+            if (stats.TryGetProperty("travelTimeP50", out var p50))
             {
-                _laneAvgSpeed = las.EnumerateArray().Select(e => e.GetDouble()).ToArray();
+                _travelTimeP50 = p50.GetDouble();
             }
 
-            if (stats.TryGetProperty("laneUtilization", out var lu) && lu.ValueKind == JsonValueKind.Array)
+            if (stats.TryGetProperty("travelTimeP95", out var p95))
             {
-                _laneUtil = lu.EnumerateArray().Select(e => e.GetDouble()).ToArray();
+                _travelTimeP95 = p95.GetDouble();
+            }
+
+            if (stats.TryGetProperty("meanLaneSpeeds", out var meanLaneSpeeds) && meanLaneSpeeds.ValueKind == JsonValueKind.Array)
+            {
+                _laneAvgSpeed = meanLaneSpeeds.EnumerateArray().Select(e => e.GetDouble()).ToArray();
+            }
+            else if (stats.TryGetProperty("laneAvgSpeed", out var laneAvgSpeed) && laneAvgSpeed.ValueKind == JsonValueKind.Array)
+            {
+                _laneAvgSpeed = laneAvgSpeed.EnumerateArray().Select(e => e.GetDouble()).ToArray();
+            }
+
+            if (stats.TryGetProperty("laneOccupancyShare", out var laneOccupancyShare) && laneOccupancyShare.ValueKind == JsonValueKind.Array)
+            {
+                _laneUtil = laneOccupancyShare.EnumerateArray().Select(e => e.GetDouble()).ToArray();
+            }
+            else if (stats.TryGetProperty("laneUtilization", out var laneUtilization) && laneUtilization.ValueKind == JsonValueKind.Array)
+            {
+                _laneUtil = laneUtilization.EnumerateArray().Select(e => e.GetDouble()).ToArray();
             }
         }
     }
@@ -461,7 +481,7 @@ internal sealed class Renderer
 {
     private readonly Config _cfg;
     private readonly char[,] _buf;
-    private readonly int _hudRows = 6;
+    private readonly int _hudRows = 9;
     private double _scrollOriginM;
     private double _cameraSpeedMps = 25;
     private const double LaneWidthM = 3.7; // must match host network lane width
@@ -556,10 +576,10 @@ internal sealed class Renderer
         return Math.Clamp(row, _hudRows, _cfg.ScreenH - 1);
     }
 
-    private void DrawHud(int ver, double time, int liveCount, (long exited, double[] avgSpeed, double[] util) stats)
+    private void DrawHud(int ver, double time, int liveCount, (double throughput, double p50, double p95, double[] avgSpeed, double[] util) stats)
     {
-        WriteRow(1, 1, $" Sim v{ver}  t={time,7:0.00}s  cam@{_scrollOriginM,8:0.0} m   fps~{1000 / _cfg.FrameMs}");
-        WriteRow(2, 1, $" Vehicles: live={liveCount,4}  exited={stats.exited,6}");
+        WriteRow(1, 1, $" Keep Right Sim v{ver}  t={time,7:0.00}s  cam@{_scrollOriginM,8:0.0} m   fps~{1000 / _cfg.FrameMs}");
+        WriteRow(2, 1, $" Vehicles live={liveCount,4}  throughput={stats.throughput,6:0} veh/hr  trips p50={stats.p50,5:0}s p95={stats.p95,5:0}s");
 
         var speeds = stats.avgSpeed.Length > 0
             ? string.Join(" | ", stats.avgSpeed.Select((mps, i) => $"L{i}:{mps * 3.6,5:0}kph"))
@@ -569,9 +589,12 @@ internal sealed class Renderer
             : "";
 
         WriteRow(3, 1, $" Avg lane speed: {speeds}");
-        WriteRow(4, 1, $" Lane utilization: {util}");
-        WriteRow(5, 1, " Legend: ■ car ▤ van █ truck ▓ bus ᚋ moto");
-        WriteRow(6, 1, new string('─', Math.Max(1, _cfg.ScreenW - 1)));
+        WriteRow(4, 1, $" Lane use:       {util}");
+        WriteRow(5, 1, " Lesson: the right lane is for cruising; left lanes work best when kept clear for active passing.");
+        WriteRow(6, 1, " Watch for: left-lane blockers create queues, extra braking, and slower journey times behind them.");
+        WriteRow(7, 1, " Try: host --scenario keep-right, then --scenario hog, or run host --report for an A/B summary.");
+        WriteRow(8, 1, " Legend: ■ car ▤ van █ truck ▓ bus ᚋ moto   Lane 0 is the rightmost lane");
+        WriteRow(9, 1, new string('─', Math.Max(1, _cfg.ScreenW - 1)));
     }
 
     private void DrawGrid()
